@@ -1,0 +1,5 @@
+name: POLIST
+
+entry_points:
+  main:
+    command: "python POLIST_02_code.py"
