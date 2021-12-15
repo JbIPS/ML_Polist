@@ -2,4 +2,6 @@ name: POLIST
 
 entry_points:
   main:
-    command: "python POLIST_02_code.py"
+    parameters:
+      nb_cluster: {type: float}
+    command: "python POLIST_02_code.py {nb_cluster}"
