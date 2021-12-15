@@ -20,18 +20,19 @@ import mlflow
 
 def preprocess(dataset, nb_category):
 		"""Add features engineering to the dataset"""
-
+		selected_columns = ['recency', 'frequency', 'monetary', 'mean_review']
 		cleaned_dataset = dataset[dataset['mean_command_freight_value'] != 0]
 		categorical_features = cleaned_dataset.select_dtypes(include=['category', 'object']).columns
-		dropped_features = categorical_features[nb_category:].append(pd.Index(['cancel_ratio']))
+		dropped_features = categorical_features[nb_category:].append(cleaned_dataset.columns.drop(selected_columns))
 		categorical_transformer = OneHotEncoder(sparse=False, handle_unknown='ignore')
 		numeric_transformer = Pipeline(steps=[('scaler', StandardScaler())])
+		log_features = list(set(['mean_command_price', 'mean_command_freight_value', 'monetary']).intersection(selected_columns))
 		log_transformer = Pipeline(steps=[('log', FunctionTransformer(np.log)), ('numeric', numeric_transformer)])
 
 		preprocessor = ColumnTransformer(
 				transformers=[
 						('cat', categorical_transformer, categorical_features[:nb_category]),
-						('log', log_transformer, ['mean_command_price', 'mean_command_freight_value', 'monetary']),
+						('log', log_transformer, log_features),
 						('dropped', 'drop', dropped_features)
 				],
 				remainder=numeric_transformer,
@@ -80,7 +81,7 @@ if __name__ == "__main__":
 						silhouette_visualizer = SilhouetteVisualizer(model)
 						silhouette_visualizer.fit(X)
 						silhouette_visualizer.show(outpath=exp_artifacts_folder + '/silhouttes.png')
-						mlflow.log_metric(f'mean silhouettes coefficient', silhouette_visualizer.silhouette_score_)
+						mlflow.log_metric('silhouettes score', silhouette_visualizer.silhouette_score_)
 						plt.close()
 
 						centroids = model.cluster_centers_
