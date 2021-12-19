@@ -3,5 +3,5 @@ name: POLIST
 entry_points:
   main:
     parameters:
-      nb_cluster: {type: float}
+      nb_cluster: {type: float, default: None}
     command: "python POLIST_02_code.py {nb_cluster}"
