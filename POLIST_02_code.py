@@ -3,6 +3,7 @@
 import os
 import sys
 import math
+import datetime
 
 import matplotlib.pyplot as plt
 import mlflow
@@ -11,20 +12,22 @@ import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
+from sklearn.metrics.cluster import adjusted_rand_score
 from sklearn.preprocessing import (FunctionTransformer, MinMaxScaler,
                                    OneHotEncoder, StandardScaler)
 from yellowbrick.cluster import KElbowVisualizer, SilhouetteVisualizer
 from yellowbrick.features import PCA as PCAViz
 
 SELECTED_COLUMNS = ['recency', 'frequency', 'monetary', 'mean_review']
-def preprocess(data, nb_category):
+def preprocess(dataset, nb_category):
     """Add features engineering to the dataset"""
-    cleaned_dataset = data[data['mean_command_freight_value'] != 0]
-    categorical_features = cleaned_dataset.select_dtypes(include=['category', 'object']).columns
-    dropped_features = categorical_features[nb_category:].append(cleaned_dataset.columns.drop(SELECTED_COLUMNS))
+    data = dataset.dropna()
+    categorical_features = data.select_dtypes(include=['category', 'object']).columns
+    dropped_features = categorical_features[nb_category:].append(data.columns.drop(SELECTED_COLUMNS))
     categorical_transformer = OneHotEncoder(sparse=False, handle_unknown='ignore')
     numeric_transformer = Pipeline(steps=[('scaler', StandardScaler())])
     log_features = list(set(['mean_command_price', 'mean_command_freight_value', 'monetary']).intersection(SELECTED_COLUMNS))
+    data.drop(data[(data[log_features] == 0).any(axis=1)].index, inplace=True)
     log_transformer = Pipeline(steps=[('log', FunctionTransformer(np.log)), ('numeric', numeric_transformer)])
 
     preprocessor = ColumnTransformer(
@@ -37,11 +40,11 @@ def preprocess(data, nb_category):
         n_jobs=-1
     )
 
-    preprocessor.fit(cleaned_dataset)
+    preprocessor.fit(data)
     # new_columns = preprocessor.named_transformers_['cat'].get_feature_names(categorical_features)
-    # columns = pd.Index(new_columns).append(cleaned_dataset.columns.drop(dropped_features))
-    columns = cleaned_dataset.columns.drop(dropped_features)
-    return pd.DataFrame(preprocessor.transform(cleaned_dataset), columns=columns)
+    # columns = pd.Index(new_columns).append(data.columns.drop(dropped_features))
+    columns = data.columns.drop(dropped_features)
+    return pd.DataFrame(preprocessor.transform(data), columns=columns)
 
 def draw_radar_plot(data, labels, merged=True, nb_columns=2, figsize=(10,10)):
     """ Draw a radar plot """
@@ -99,72 +102,140 @@ def analyze_clusters(data, labels, title=""):
         mlflow.log_figure(fig, ARTIFACTS_FOLDER + f'/[{title}] {i} boxplot.png')
         plt.close(fig)
 
+def split_periods(dataset, period, time_column="order_purchase_timestamp"):
+    """
+    Split the dataset into periods based on periods given
+
+        Parameters:
+            data (DataFrame): DataFrame to split
+            period (int): Number of days for each period
+            time_column (str): Column label containing time info. Default to 'total_recency'
+
+        Returns:
+            data_periods (DataFrame[]): A list of DataFrame group by period defined by input
+    """
+    data = dataset.copy()
+    data[time_column] = pd.to_datetime(data[time_column])
+    data_periods = []
+    delta = datetime.timedelta(period)
+    last_threshold = data[time_column].min()
+    max_date = data[time_column].max()
+    while(last_threshold < max_date):
+        data_periods.append(data[(data[time_column] >= last_threshold)
+                                 & (data[time_column] < last_threshold + delta)])
+        last_threshold += delta
+
+    return data_periods
+
+def get_rfm(data, time_column='order_purchase_timestamp', id_column='customer_unique_id', customer_id_column='customer_id', price_column='price'):
+    """ Get RFM marketing data from input dataset """
+    max_date = max(data[time_column]) + datetime.timedelta(days=1)
+    rfm_data = data.groupby(id_column).agg({
+            time_column: lambda x: (max_date - x.max()).days,
+            customer_id_column: 'count',
+            price_column: 'sum'
+    })
+    rfm_data.columns = ['recency','frequency','monetary']
+    return rfm_data
+
+def get_mean_review(dataset, review_column='review_score', id_column='customer_unique_id', customer_id_column='customer_id'):
+    """ Get mean review for each unique customer """
+    mean_review = dataset.dropna(subset=[review_column]).groupby([id_column, customer_id_column])[review_column].first()\
+        .groupby(id_column).mean()
+    mean_review.name = 'mean_review'
+    return mean_review
 
 if __name__ == "__main__":
     mlflow.set_experiment('POLIST')
+    TIME_ANALYSIS = len(sys.argv) > 1 and sys.argv[1] == 'time_analysis'
     with mlflow.start_run():
         ARTIFACTS_FOLDER = 'outputs'
         if not os.path.exists(ARTIFACTS_FOLDER):
             os.makedirs(ARTIFACTS_FOLDER)
-        dataset = pd.read_csv('./clean_dataset.csv', index_col=0)
 
-        X = preprocess(dataset, 0)
+        if not TIME_ANALYSIS:
+            dataset = pd.read_csv('./clean_dataset.csv', index_col=0)
 
-        NB_CLUSTER = int(sys.argv[1]) if len(sys.argv) > 1 else None
+            X = preprocess(dataset, 0)
 
-        if NB_CLUSTER is None:
-          # Exploration
-            pca_visualizer = PCAViz(proj_features=True, scale=False)
-            pca_visualizer.fit_transform(X)
-            mlflow.log_figure(pca_visualizer.fig, ARTIFACTS_FOLDER + '/PCA.png')
-            plt.close()
+            NB_CLUSTER = int(sys.argv[1]) if len(sys.argv) > 1 else None
 
-            visualizer = KElbowVisualizer(KMeans(), k=(2,10))
-            visualizer.fit(X)
-            mlflow.log_figure(visualizer.fig, ARTIFACTS_FOLDER + '/KMeans elbow.png')
-            plt.close()
-            elbow_value = visualizer.elbow_value_ if visualizer.elbow_value_ is not None else 4
-
-            for nb_cluster in range(elbow_value - 2, elbow_value + 3):
-                exp_artifacts_folder = f'{ARTIFACTS_FOLDER}'
-                if not os.path.exists(exp_artifacts_folder):
-                    os.makedirs(exp_artifacts_folder)
-                with mlflow.start_run(run_name=f"Exploration {nb_cluster} clusters", nested=True):
-                    mlflow.log_param('nb_cluster', nb_cluster)
-                    model = create_clusters(X, nb_cluster)
-
-                    silhouette_visualizer = SilhouetteVisualizer(model)
-                    silhouette_visualizer.fit(X)
-                    mlflow.log_figure(silhouette_visualizer.fig, exp_artifacts_folder + '/silhouttes.png')
-                    mlflow.log_metric('silhouettes score', silhouette_visualizer.silhouette_score_)
-                    plt.close()
-
-                    fig = draw_radar_plot(model.cluster_centers_, X.columns.values)
-                    mlflow.log_figure(fig, exp_artifacts_folder + '/clusters_stats.png')
-        else:
-            # Get clusters details
-            with mlflow.start_run(run_name="Clusters details", nested=True):
-                mlflow.log_param('nb_cluster', NB_CLUSTER)
-                model = create_clusters(X, NB_CLUSTER)
-
-                # Visualize clusters on PCA projection
-                pca_visualizer = PCAViz(scale=False)
-                pca_visualizer.fit_transform(X, model.labels_)
-                mlflow.log_figure(pca_visualizer.fig, ARTIFACTS_FOLDER + '/Cluster viz.png')
+            if NB_CLUSTER is None:
+              # Exploration
+                pca_visualizer = PCAViz(proj_features=True, scale=False)
+                pca_visualizer.fit_transform(X)
+                mlflow.log_figure(pca_visualizer.fig, ARTIFACTS_FOLDER + '/PCA.png')
                 plt.close()
 
-                # Get clusters stats
-                fig = draw_radar_plot(model.cluster_centers_, X.columns.values, merged=False, figsize=(20,20))
-                mlflow.log_figure(fig, ARTIFACTS_FOLDER + '/clusters_stats.png')
+                visualizer = KElbowVisualizer(KMeans(), k=(2,10))
+                visualizer.fit(X)
+                mlflow.log_figure(visualizer.fig, ARTIFACTS_FOLDER + '/KMeans elbow.png')
+                plt.close()
+                elbow_value = visualizer.elbow_value_ if visualizer.elbow_value_ is not None else 4
 
-                # Draw boxplots for each features in cluster
-                labels = pd.Series(model.labels_)
-                labels.name = 'label'
-                analyze_clusters(dataset[SELECTED_COLUMNS], labels, "Raw")
-                analyze_clusters(X, labels, "Standard")
+                for nb_cluster in range(elbow_value - 2, elbow_value + 3):
+                    exp_artifacts_folder = f'{ARTIFACTS_FOLDER}'
+                    if not os.path.exists(exp_artifacts_folder):
+                        os.makedirs(exp_artifacts_folder)
+                    with mlflow.start_run(run_name=f"Exploration {nb_cluster} clusters", nested=True):
+                        mlflow.log_param('nb_cluster', nb_cluster)
+                        model = create_clusters(X, nb_cluster)
 
-                minMaxed = pd.DataFrame(MinMaxScaler().fit_transform(X), columns=SELECTED_COLUMNS)
-                analyze_clusters(minMaxed, labels, "MinMaxed")
+                        silhouette_visualizer = SilhouetteVisualizer(model)
+                        silhouette_visualizer.fit(X)
+                        mlflow.log_figure(silhouette_visualizer.fig, exp_artifacts_folder + '/silhouttes.png')
+                        mlflow.log_metric('silhouettes score', silhouette_visualizer.silhouette_score_)
+                        plt.close()
+
+                        fig = draw_radar_plot(model.cluster_centers_, X.columns.values)
+                        mlflow.log_figure(fig, exp_artifacts_folder + '/clusters_stats.png')
+            else:
+                # Get clusters details
+                with mlflow.start_run(run_name="Clusters details", nested=True):
+                    mlflow.log_param('nb_cluster', NB_CLUSTER)
+                    model = create_clusters(X, NB_CLUSTER)
+
+                    # Visualize clusters on PCA projection
+                    pca_visualizer = PCAViz(scale=False)
+                    pca_visualizer.fit_transform(X, model.labels_)
+                    mlflow.log_figure(pca_visualizer.fig, ARTIFACTS_FOLDER + '/Cluster viz.png')
+                    plt.close()
+
+                    # Get clusters stats
+                    fig = draw_radar_plot(model.cluster_centers_, X.columns.values, merged=False, figsize=(20,20))
+                    mlflow.log_figure(fig, ARTIFACTS_FOLDER + '/clusters_stats.png')
+
+                    # Draw boxplots for each features in cluster
+                    labels = pd.Series(model.labels_)
+                    labels.name = 'label'
+                    analyze_clusters(dataset[SELECTED_COLUMNS], labels, "Raw")
+                    analyze_clusters(X, labels, "Standard")
+
+                    minMaxed = pd.DataFrame(MinMaxScaler().fit_transform(X), columns=SELECTED_COLUMNS)
+                    analyze_clusters(minMaxed, labels, "MinMaxed")
+
+        else:
+            # Temporal analysis
+            NB_CLUSTER = 5
+            dataset = pd.read_csv('./full_dataset.csv', index_col=0)
+            periods = split_periods(dataset, 30)
+            first_period = pd.concat(periods[0:6])
+            # rfm_data = get_rfm(first_period)
+            # mean_review = get_mean_review(first_period)
+            periods = [first_period] + periods[6:]
+            models = []
+            # TODO iterarte on all periods, calculate ARI between n and n+1
+            for i in range(0, 2):
+                period_data = pd.concat(periods[:i+1])
+                period_rfm_data = get_rfm(period_data)
+                period_mean_review = get_mean_review(period_data)
+
+                period_dataset = pd.concat([period_rfm_data, period_mean_review], axis=1)
+                X = preprocess(period_dataset, 0)
+                period_model = create_clusters(X, NB_CLUSTER)
+                models.append((period_model, X))
+
+            mlflow.log_metric('ARI', adjusted_rand_score(models[0][0].predict(models[1][1]), models[1][0].labels_));
 
 
         for file in os.listdir(ARTIFACTS_FOLDER):
