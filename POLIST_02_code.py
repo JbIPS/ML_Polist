@@ -27,7 +27,7 @@ def preprocess(dataset, nb_category):
     categorical_transformer = OneHotEncoder(sparse=False, handle_unknown='ignore')
     numeric_transformer = Pipeline(steps=[('scaler', StandardScaler())])
     log_features = list(set(['mean_command_price', 'mean_command_freight_value', 'monetary']).intersection(SELECTED_COLUMNS))
-    data.drop(data[(data[log_features] == 0).any(axis=1)].index, inplace=True)
+    data = data.drop(data[(data[log_features] == 0).any(axis=1)].index)
     log_transformer = Pipeline(steps=[('log', FunctionTransformer(np.log)), ('numeric', numeric_transformer)])
 
     preprocessor = ColumnTransformer(
@@ -224,8 +224,9 @@ if __name__ == "__main__":
             # mean_review = get_mean_review(first_period)
             periods = [first_period] + periods[6:]
             models = []
+            # aris = []
             # TODO iterarte on all periods, calculate ARI between n and n+1
-            for i in range(0, 2):
+            for i,_ in enumerate(periods):
                 period_data = pd.concat(periods[:i+1])
                 period_rfm_data = get_rfm(period_data)
                 period_mean_review = get_mean_review(period_data)
@@ -233,10 +234,22 @@ if __name__ == "__main__":
                 period_dataset = pd.concat([period_rfm_data, period_mean_review], axis=1)
                 X = preprocess(period_dataset, 0)
                 period_model = create_clusters(X, NB_CLUSTER)
-                models.append((period_model, X))
 
-            mlflow.log_metric('ARI', adjusted_rand_score(models[0][0].predict(models[1][1]), models[1][0].labels_));
+                for model,aris in models:
+                    ari = adjusted_rand_score(model.predict(X), period_model.labels_)
+                    # mlflow.log_metric('ARI', ari)
+                    aris.append(ari)
 
+                models.append((period_model, [None] * i))
+
+            fig, ax = plt.subplots(figsize=(20,20))
+            periods_index = [i for i,_ in enumerate(periods[1:])]
+            for model, aris in models:
+                plt.plot(periods_index, aris, '-o', figure=fig)
+            ax.set_xticks(periods_index)
+            plt.legend([i for i,_ in enumerate(models)])
+            mlflow.log_figure(fig, ARTIFACTS_FOLDER + '/ARI.png')
+            plt.close(fig)
 
         for file in os.listdir(ARTIFACTS_FOLDER):
             os.unlink(os.path.join(ARTIFACTS_FOLDER, file))
