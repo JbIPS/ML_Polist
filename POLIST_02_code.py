@@ -1,34 +1,35 @@
 #!/usr/bin/env python
 # coding: utf-8
+
 import datetime
+from enum import Enum
 import math
 import os
 import sys
 import typing
+from typing import cast
 
+from kneed import KneeLocator
 import matplotlib.pyplot as plt
+import mlflow
 import numpy as np
 import pandas as pd
-from enum import Enum
-from kneed import KneeLocator
 from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans
+# from sklearn.compose import ColumnTransformer
 from sklearn.metrics import adjusted_rand_score
-from sklearn.compose import ColumnTransformer
+# from sklearn.metrics import accuracy_score, adjusted_rand_score
 from sklearn.metrics import (
-    calinski_harabasz_score, # Coherence in cluster, higher the better
-    davies_bouldin_score, # Similarity between clusters, minimum 0, lower the better
-    silhouette_score, # Intra-cluster distance vs inter-cluster distance. Between -1 and 1. higher the better
+    calinski_harabasz_score,
+    davies_bouldin_score,
+    silhouette_score,
 )
 from sklearn.neighbors import NearestNeighbors
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import (
     FunctionTransformer,
     MinMaxScaler,
-    OneHotEncoder,
     StandardScaler,
 )
-
-import mlflow
 from yellowbrick.cluster import KElbowVisualizer, SilhouetteVisualizer
 from yellowbrick.features import PCA as PCAViz
 
@@ -42,36 +43,63 @@ SELECTED_COLUMNS = ['recency', 'frequency', 'monetary', 'mean_review']
 AGGLO_SAMPLING_RATIO = 0.1 # Due to memory consumption, we need to sample the data
 
 def preprocess(dataset: pd.DataFrame, scale: bool = True, log: bool = True) -> pd.DataFrame:
-    """Add features engineering to the dataset"""
-    data = dataset.dropna()
-    dropped_features = data.columns.drop(SELECTED_COLUMNS)
+    """
+        Add features engineering to the dataset.
+
+        Parameters:
+            dataset: Dataset to preprocess
+            scale: Wether to use a StandardScaler on the data
+            log: Wether to use a log transformation on data
+
+        Returns:
+            Preprocess data
+    """
+    data = dataset.copy()
+
+    # Extract RFM data from dataset
+    rfm_data = get_rfm(data)
+    mean_review = get_mean_review(data)
+
+    data = pd.concat([rfm_data, mean_review], axis=1)
     numeric_transformer = Pipeline(steps=[('scaler', StandardScaler() if scale else 'passthrough')])
     log_features = ['monetary']
     data = data.drop(data[(data[log_features] == 0).any(axis=1)].index)
+    data.dropna(inplace = True)
     log_transformer = Pipeline(steps=[('log', FunctionTransformer(np.log) if log else 'passthrough'),
                                       ('numeric', numeric_transformer)])
 
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('log', log_transformer, log_features),
-            ('dropped', 'drop', dropped_features)
-        ],
-        remainder=numeric_transformer,
-        n_jobs=-1
-    )
+    # preprocessor = ColumnTransformer(
+        # transformers=[
+            # ('log', log_transformer, log_features),
+        # ],
+        # remainder=numeric_transformer,
+        # n_jobs=-1
+    # )
+    preprocessor = log_transformer
 
     preprocessor.fit(data)
-    columns = data.columns.drop(dropped_features)
-    return pd.DataFrame(preprocessor.transform(data), columns=columns)
+    return pd.DataFrame(preprocessor.transform(data), columns=SELECTED_COLUMNS)
 
 def draw_radar_plot(data: tuple[typing.Any], labels: list[str], merged: bool = True, nb_columns: int = 2, figsize: tuple[int, int] = (10,10)) -> plt.Figure:
-    """ Draw a radar plot """
+    """
+        Draw a radar plot.
+
+        Parameters:
+            data: Point coordinates to draw on radar
+            labels: Labels of the axes
+            merged: Wether to draw all points on the same radar plot
+            nb_columns: If multiple plot, select a number of columns for the layout
+            figsize: Tuple of figure size passed to pyplot
+
+        Returns:
+            The radar plot figure
+    """
     scaler = MinMaxScaler()
     stats = scaler.fit_transform(data)
 
     angles=np.linspace(0, 2*np.pi, len(labels), endpoint=False)
     # close the shape
-    angles=np.concatenate((angles,[angles[0]]))
+    angles=np.concatenate((angles, np.array(angles[0])))
     first_stats = np.array([stat[0] for stat in stats]).reshape(-1,1)
     stats = np.append(stats, first_stats, axis=1)
 
@@ -93,7 +121,13 @@ def draw_radar_plot(data: tuple[typing.Any], labels: list[str], merged: bool = T
     return fig
 
 def create_clusters(X: pd.DataFrame, algorithm: Algorithms) -> None:
-    """ Cluster data in X into nb_cluster """
+    """
+        Use selected algorithm to cluster the data in X.
+
+        Parameters:
+            X: Data to run the algorithm on
+            algorithm: Clustering algorithm. Currently support K-Means, AgglomerativeClustering and DBSCAN
+    """
     with mlflow.start_run(run_name=f"Clustering with {algorithm}", nested=True):
         if algorithm == Algorithms.KMEANS or algorithm == Algorithms.AGGLO:
             data = X if algorithm == Algorithms.KMEANS else X.sample(frac=AGGLO_SAMPLING_RATIO)
@@ -105,7 +139,7 @@ def create_clusters(X: pd.DataFrame, algorithm: Algorithms) -> None:
             if not elbow_value:
                 raise Exception(f"Cannot find {algorithm} elbow")
 
-            for nb_cluster in range(elbow_value - 2, elbow_value + 3):
+            for nb_cluster in range(min(elbow_value - 2, 2), max(elbow_value + 3, 8)):
                 exp_artifacts_folder = f'{ARTIFACTS_FOLDER}'
                 if not os.path.exists(exp_artifacts_folder):
                     os.makedirs(exp_artifacts_folder)
@@ -126,7 +160,7 @@ def create_clusters(X: pd.DataFrame, algorithm: Algorithms) -> None:
                         mlflow.log_metric(f'{algorithm} silhouettes score', silhouette_score(data, model.labels_))
 
                     # Visualize clusters on PCA projection
-                    pca_visualizer = PCAViz(scale=False)
+                    pca_visualizer = PCAViz()
                     pca_visualizer.fit_transform(data, model.labels_)
                     mlflow.log_figure(pca_visualizer.fig, ARTIFACTS_FOLDER + f'/{algorithm} - {nb_cluster} cluster viz.png')
                     plt.close()
@@ -138,8 +172,8 @@ def create_clusters(X: pd.DataFrame, algorithm: Algorithms) -> None:
             # Get information on the distance between neighbors
             nb_neighbors = 10
             nearest_neighbors = NearestNeighbors(n_neighbors=nb_neighbors)
-            neighbors = nearest_neighbors.fit(X)
-            distances, _ = neighbors.kneighbors(X)
+            nearest_neighbors.fit(X)
+            distances, _ = nearest_neighbors.kneighbors(X)
 
             # Get max distance between neighbors
             max_distances = np.sort(distances[:, nb_neighbors - 1])
@@ -152,12 +186,12 @@ def create_clusters(X: pd.DataFrame, algorithm: Algorithms) -> None:
             plt.ylabel("Distance")
             mlflow.log_figure(plt.gcf(), ARTIFACTS_FOLDER + '/DBSCAN elbow.png')
             plt.close()
-            mlflow.log_metric('dbscan elbow', knee.elbow_y)
+            mlflow.log_metric('dbscan elbow', cast(float, knee.elbow_y))
             model = DBSCAN(min_samples=100, eps=knee.elbow_y)
             model.fit(X)
 
             # Visualize clusters on PCA projection
-            pca_visualizer = PCAViz(scale=False)
+            pca_visualizer = PCAViz()
             pca_visualizer.fit_transform(X, model.labels_)
             mlflow.log_figure(pca_visualizer.fig, ARTIFACTS_FOLDER + f'/{algorithm} - {len(np.unique(model.labels_))} cluster viz.png')
             plt.close()
@@ -167,7 +201,14 @@ def create_clusters(X: pd.DataFrame, algorithm: Algorithms) -> None:
             mlflow.log_metric(f'{algorithm} davies score', davies_bouldin_score(X, model.labels_))
 
 def analyze_clusters(data: pd.DataFrame, labels: pd.Series, title: str ="") -> None:
-    """ Draw boxplots for each cluster and each features """
+    """
+        Draw boxplots for each cluster and each features.
+
+        Parameters:
+            data: Data to anaylze
+            labels: Clusters labels assign to data
+            title: Title of the plots. Default to ""
+    """
     data_labeled = data.reset_index(drop=True).merge(labels, left_index=True, right_index=True)
     grouped = data_labeled.groupby(labels.name)
     mlflow.log_dict(grouped.count().iloc[:, 0].to_dict(), ARTIFACTS_FOLDER + '/Clusters size.json')
@@ -202,7 +243,6 @@ def split_periods(dataset: pd.DataFrame, period: int, time_column: str ="order_p
             data_periods (DataFrame[]): A list of DataFrame group by period defined by input
     """
     data = dataset.copy()
-    data[time_column] = pd.to_datetime(data[time_column])
     data_periods = []
     delta = datetime.timedelta(period)
     last_threshold = data[time_column].min()
@@ -214,8 +254,9 @@ def split_periods(dataset: pd.DataFrame, period: int, time_column: str ="order_p
 
     return data_periods
 
-def get_rfm(data: pd.DataFrame, time_column: str = 'order_purchase_timestamp', id_column: str = 'customer_unique_id', customer_id_column: str = 'customer_id', price_column: str = 'price') -> pd.DataFrame :
+def get_rfm(dataset: pd.DataFrame, time_column: str = 'order_purchase_timestamp', id_column: str = 'customer_unique_id', customer_id_column: str = 'customer_id', price_column: str = 'price') -> pd.DataFrame :
     """ Get RFM marketing data from input dataset """
+    data = dataset.copy()
     max_date = max(data[time_column]) + datetime.timedelta(days=1)
     rfm_data = data.groupby(id_column).agg({
             time_column: lambda x: (max_date - x.max()).days,
@@ -241,20 +282,20 @@ if __name__ == "__main__":
             os.makedirs(ARTIFACTS_FOLDER)
 
         if not TIME_ANALYSIS:
-            dataset = pd.read_csv('./clean_dataset.csv', index_col=0)
-
-            X = preprocess(dataset, False)
+            dataset = pd.read_csv('./full_dataset.csv', index_col=0)
 
             NB_CLUSTER = int(sys.argv[1]) if len(sys.argv) > 1 else None
 
             if NB_CLUSTER is None:
-              # Exploration
+                X = preprocess(dataset, False)
+
+                # Exploration
                 pca_visualizer = PCAViz(proj_features=True)
                 pca_visualizer.fit_transform(X)
                 mlflow.log_figure(pca_visualizer.fig, ARTIFACTS_FOLDER + '/PCA.png')
                 plt.close()
 
-                for algo in Algorithms:
+                for algo in [Algorithms.DBSCAN]:
                     print(f'Creating clusters with {algo}')
                     create_clusters(X, algo)
 
@@ -266,10 +307,10 @@ if __name__ == "__main__":
                 print(f'Analyzing clusters with selected algo')
                 mlflow.log_param('nb_cluster', NB_CLUSTER)
                 model = KMeans(n_clusters=NB_CLUSTER, random_state=3)
-                X = preprocess(dataset, False)
+                X = preprocess(dataset)
 
                 step = 0
-                for scale, log in [(False, False), (False, True), (True, False), (True, True)]:
+                for scale, log in [(True, False), (True, True)]:
                     data = preprocess(dataset, scale, log)
                     model.fit(data)
 
@@ -293,29 +334,26 @@ if __name__ == "__main__":
                 mlflow.log_figure(fig, ARTIFACTS_FOLDER + '/clusters_stats.png')
 
                 # Draw boxplots for each features in cluster
-                labels = pd.Series(model.labels_)
-                labels.name = 'label'
-                analyze_clusters(dataset[SELECTED_COLUMNS], labels, "Raw")
-                analyze_clusters(X, labels, "Standard")
+                # labels = pd.Series(model.labels_)
+                # labels.name = 'label'
+                # analyze_clusters(X, labels, "Log")
+                # analyze_clusters(preprocess(dataset, True), labels, "Standard")
 
-                minMaxed = pd.DataFrame(MinMaxScaler().fit_transform(X), columns=SELECTED_COLUMNS)
-                analyze_clusters(minMaxed, labels, "MinMaxed")
+                # minMaxed = pd.DataFrame(MinMaxScaler().fit_transform(X), columns=SELECTED_COLUMNS)
+                # analyze_clusters(minMaxed, labels, "MinMaxed")
 
         else:
             # Temporal analysis
             NB_CLUSTER = 5
-            dataset = pd.read_csv('./full_dataset.csv', index_col=0)
+            dataset = pd.read_csv('./full_dataset.csv', index_col=0, parse_dates=['order_purchase_timestamp'])
             periods = split_periods(dataset, 30)
             first_period = pd.concat(periods[0:6])
             periods = [first_period] + periods[6:]
             models = []
+            Xs = []
             for i,_ in enumerate(periods):
                 period_data = pd.concat(periods[:i+1])
-                period_rfm_data = get_rfm(period_data)
-                period_mean_review = get_mean_review(period_data)
-
-                period_dataset = pd.concat([period_rfm_data, period_mean_review], axis=1)
-                X = preprocess(period_dataset, False)
+                X = preprocess(period_data)
                 period_model = KMeans(n_clusters=NB_CLUSTER, random_state=3)
                 period_model.fit(X)
 
@@ -324,12 +362,19 @@ if __name__ == "__main__":
                     aris.append(ari)
 
                 models.append((period_model, [None] * i))
+                Xs.append(X)
 
-            fig, ax = plt.subplots(figsize=(20,20))
+            fig, ax = plt.subplots(figsize=(40,20))
             periods_index = [i for i,_ in enumerate(periods[1:])]
             for model, aris in models:
                 plt.plot(periods_index, aris, '-o', figure=fig)
-            ax.set_xticks([ str(i) + f'\n{periods[i].shape[0]}' for i in periods_index])
+
+            ax.set_ylim(0, 1)
+            ax.set_xticks(periods_index)
+            for i, xpos in enumerate(ax.get_xticks()):
+                ax.text(xpos, -0.02, f"Period pop.\n{str(Xs[i].shape[0])}", size=10, ha='center')
+                # print(f"Period pop.\n{str(Xs[i].shape[0])}")
+
             plt.legend([i for i,_ in enumerate(models)])
             mlflow.log_figure(fig, ARTIFACTS_FOLDER + '/ARI.png')
             plt.close(fig)
