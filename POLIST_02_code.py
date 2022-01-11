@@ -15,9 +15,7 @@ import mlflow
 import numpy as np
 import pandas as pd
 from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans
-# from sklearn.compose import ColumnTransformer
-from sklearn.metrics import adjusted_rand_score
-# from sklearn.metrics import accuracy_score, adjusted_rand_score
+from sklearn.metrics import accuracy_score, adjusted_rand_score, v_measure_score, confusion_matrix
 from sklearn.metrics import (
     calinski_harabasz_score,
     davies_bouldin_score,
@@ -25,11 +23,7 @@ from sklearn.metrics import (
 )
 from sklearn.neighbors import NearestNeighbors
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import (
-    FunctionTransformer,
-    MinMaxScaler,
-    StandardScaler,
-)
+from sklearn.preprocessing import FunctionTransformer, MinMaxScaler, StandardScaler
 from yellowbrick.cluster import KElbowVisualizer, SilhouetteVisualizer
 from yellowbrick.features import PCA as PCAViz
 
@@ -54,11 +48,9 @@ def preprocess(dataset: pd.DataFrame, scale: bool = True, log: bool = True) -> p
         Returns:
             Preprocess data
     """
-    data = dataset.copy()
-
     # Extract RFM data from dataset
-    rfm_data = get_rfm(data)
-    mean_review = get_mean_review(data)
+    rfm_data = get_rfm(dataset)
+    mean_review = get_mean_review(dataset)
 
     data = pd.concat([rfm_data, mean_review], axis=1)
     numeric_transformer = Pipeline(steps=[('scaler', StandardScaler() if scale else 'passthrough')])
@@ -67,14 +59,6 @@ def preprocess(dataset: pd.DataFrame, scale: bool = True, log: bool = True) -> p
     data.dropna(inplace = True)
     log_transformer = Pipeline(steps=[('log', FunctionTransformer(np.log) if log else 'passthrough'),
                                       ('numeric', numeric_transformer)])
-
-    # preprocessor = ColumnTransformer(
-        # transformers=[
-            # ('log', log_transformer, log_features),
-        # ],
-        # remainder=numeric_transformer,
-        # n_jobs=-1
-    # )
     preprocessor = log_transformer
 
     preprocessor.fit(data)
@@ -98,7 +82,7 @@ def draw_radar_plot(data: tuple[typing.Any], labels: list[str], merged: bool = T
     stats = scaler.fit_transform(data)
 
     angles=np.linspace(0, 2*np.pi, len(labels), endpoint=False)
-    # close the shape
+    # Close the shape
     angles=np.concatenate((angles, np.array(angles[0])))
     first_stats = np.array([stat[0] for stat in stats]).reshape(-1,1)
     stats = np.append(stats, first_stats, axis=1)
@@ -117,7 +101,6 @@ def draw_radar_plot(data: tuple[typing.Any], labels: list[str], merged: bool = T
         ax.set_title(f'Cluster {i}')
     fig.suptitle("Clusters stats")
     fig.tight_layout()
-    plt.close(fig)
     return fig
 
 def create_clusters(X: pd.DataFrame, algorithm: Algorithms) -> None:
@@ -232,7 +215,7 @@ def analyze_clusters(data: pd.DataFrame, labels: pd.Series, title: str ="") -> N
 
 def split_periods(dataset: pd.DataFrame, period: int, time_column: str ="order_purchase_timestamp") -> list[pd.DataFrame]:
     """
-    Split the dataset into periods based on periods given
+        Split the dataset into periods based on periods given
 
         Parameters:
             data (DataFrame): DataFrame to split
@@ -242,23 +225,33 @@ def split_periods(dataset: pd.DataFrame, period: int, time_column: str ="order_p
         Returns:
             data_periods (DataFrame[]): A list of DataFrame group by period defined by input
     """
-    data = dataset.copy()
     data_periods = []
     delta = datetime.timedelta(period)
-    last_threshold = data[time_column].min()
-    max_date = data[time_column].max()
+    last_threshold = dataset[time_column].min()
+    max_date = dataset[time_column].max()
     while(last_threshold < max_date):
-        data_periods.append(data[(data[time_column] >= last_threshold)
-                                 & (data[time_column] < last_threshold + delta)])
+        data_periods.append(dataset[(dataset[time_column] >= last_threshold)
+                                 & (dataset[time_column] < last_threshold + delta)])
         last_threshold += delta
 
     return data_periods
 
 def get_rfm(dataset: pd.DataFrame, time_column: str = 'order_purchase_timestamp', id_column: str = 'customer_unique_id', customer_id_column: str = 'customer_id', price_column: str = 'price') -> pd.DataFrame :
-    """ Get RFM marketing data from input dataset """
-    data = dataset.copy()
-    max_date = max(data[time_column]) + datetime.timedelta(days=1)
-    rfm_data = data.groupby(id_column).agg({
+    """
+        Get RFM marketing data from input dataset
+
+        Parameters:
+            dataset: Dataset to extract RFM data from
+            time_column: Name of the column containing time data. Default to `order_purchase_timestamp`
+            id_column: Name of the column containing a unique ID. Default to `customer_unique_id`
+            customer_id_column: Name of the column containing ordering ID. Default to `customer_id`
+            price_column: Name of the column containing price data. Default to `price`
+
+        Returns:
+            A DataFrame with recency, frequency and monetary data
+    """
+    max_date = max(dataset[time_column]) + datetime.timedelta(days=1)
+    rfm_data = dataset.groupby(id_column).agg({
             time_column: lambda x: (max_date - x.max()).days,
             customer_id_column: 'count',
             price_column: 'sum'
@@ -267,7 +260,18 @@ def get_rfm(dataset: pd.DataFrame, time_column: str = 'order_purchase_timestamp'
     return rfm_data
 
 def get_mean_review(dataset: pd.DataFrame, review_column: str = 'review_score', id_column: str = 'customer_unique_id', customer_id_column: str = 'customer_id') -> pd.Series:
-    """ Get mean review for each unique customer """
+    """
+        Get mean review for each unique customer
+
+        Parameters:
+            dataset: Dataset to extract mean review from
+            review_column: Name of the column containing review data. Default to `review_score`
+            id_column: Name of the column containing a unique ID. Default to `customer_unique_id`
+            customer_id_column: Name of the column containing ordering ID. Default to `customer_id`
+
+        Returns:
+            A Series with the mean review for each customer
+    """
     mean_review = dataset.dropna(subset=[review_column]).groupby([id_column, customer_id_column])[review_column].first()\
         .groupby(id_column).mean()
     mean_review.name = 'mean_review'
@@ -281,9 +285,11 @@ if __name__ == "__main__":
         if not os.path.exists(ARTIFACTS_FOLDER):
             os.makedirs(ARTIFACTS_FOLDER)
 
-        if not TIME_ANALYSIS:
-            dataset = pd.read_csv('./full_dataset.csv', index_col=0)
+        # Load dataset and parse timestamps
+        dataset = pd.read_csv('./full_dataset.csv', index_col=0, parse_dates=['order_purchase_timestamp'])
 
+        if not TIME_ANALYSIS:
+            # Try to read cluster number from CLI
             NB_CLUSTER = int(sys.argv[1]) if len(sys.argv) > 1 else None
 
             if NB_CLUSTER is None:
@@ -295,7 +301,7 @@ if __name__ == "__main__":
                 mlflow.log_figure(pca_visualizer.fig, ARTIFACTS_FOLDER + '/PCA.png')
                 plt.close()
 
-                for algo in [Algorithms.DBSCAN]:
+                for algo in Algorithms:
                     print(f'Creating clusters with {algo}')
                     create_clusters(X, algo)
 
@@ -327,57 +333,104 @@ if __name__ == "__main__":
                 pca_visualizer = PCAViz()
                 pca_visualizer.fit_transform(X, model.labels_)
                 mlflow.log_figure(pca_visualizer.fig, ARTIFACTS_FOLDER + '/Cluster viz.png')
-                plt.close()
+                plt.close(pca_visualizer.fig)
 
                 # Get clusters stats
                 fig = draw_radar_plot(model.cluster_centers_, X.columns.values, merged=False, figsize=(20,20))
                 mlflow.log_figure(fig, ARTIFACTS_FOLDER + '/clusters_stats.png')
+                plt.close(fig)
 
                 # Draw boxplots for each features in cluster
-                # labels = pd.Series(model.labels_)
-                # labels.name = 'label'
-                # analyze_clusters(X, labels, "Log")
-                # analyze_clusters(preprocess(dataset, True), labels, "Standard")
+                labels = pd.Series(model.labels_)
+                labels.name = 'label'
+                analyze_clusters(X, labels, "Log")
+                analyze_clusters(preprocess(dataset, True), labels, "Standard")
 
-                # minMaxed = pd.DataFrame(MinMaxScaler().fit_transform(X), columns=SELECTED_COLUMNS)
-                # analyze_clusters(minMaxed, labels, "MinMaxed")
+                minMaxed = pd.DataFrame(MinMaxScaler().fit_transform(X), columns=SELECTED_COLUMNS)
+                analyze_clusters(minMaxed, labels, "MinMaxed")
 
-        else:
-            # Temporal analysis
-            NB_CLUSTER = 5
-            dataset = pd.read_csv('./full_dataset.csv', index_col=0, parse_dates=['order_purchase_timestamp'])
-            periods = split_periods(dataset, 30)
-            first_period = pd.concat(periods[0:6])
-            periods = [first_period] + periods[6:]
-            models = []
-            Xs = []
-            for i,_ in enumerate(periods):
-                period_data = pd.concat(periods[:i+1])
-                X = preprocess(period_data)
-                period_model = KMeans(n_clusters=NB_CLUSTER, random_state=3)
-                period_model.fit(X)
+        # Temporal analysis
+        NB_CLUSTER = 5
+        periods = split_periods(dataset, 30)
+        first_period = pd.concat(periods[0:6])
+        periods = [first_period] + periods[6:]
+        models = []
+        Xs = []
 
-                for model,aris in models:
-                    ari = adjusted_rand_score(model.predict(X), period_model.labels_)
-                    aris.append(ari)
+        # Compute consistency scores between periods
+        for i,_ in enumerate(periods):
+            period_data = pd.concat(periods[:i+1])
+            X = preprocess(period_data)
+            period_model = KMeans(n_clusters=NB_CLUSTER, random_state=3)
+            period_model.fit(X)
 
-                models.append((period_model, [None] * i))
-                Xs.append(X)
+            for j, (model,aris, v_mesures, accuracies) in enumerate(models):
+                y_true = period_model.labels_
+                y_pred = model.predict(X)
+                # Adjusted Rand Score, label agnostic
+                ari = adjusted_rand_score(y_true, y_pred)
+                # mlflow.log_metric('ARI', ari, j)
+                aris.append(ari)
 
-            fig, ax = plt.subplots(figsize=(40,20))
-            periods_index = [i for i,_ in enumerate(periods[1:])]
-            for model, aris in models:
-                plt.plot(periods_index, aris, '-o', figure=fig)
+                # V-measure, also label agnostic
+                v_measure = v_measure_score(y_true, y_pred)
+                # mlflow.log_metric('V-mesure', v_measure, j)
+                v_mesures.append(v_measure)
 
-            ax.set_ylim(0, 1)
-            ax.set_xticks(periods_index)
-            for i, xpos in enumerate(ax.get_xticks()):
-                ax.text(xpos, -0.02, f"Period pop.\n{str(Xs[i].shape[0])}", size=10, ha='center')
-                # print(f"Period pop.\n{str(Xs[i].shape[0])}")
+                # Accuracy, we need to match clusters label between period
+                conf_matrix = confusion_matrix(y_true, y_pred)
+                rows = []
+                for k, row in enumerate(conf_matrix):
+                    argmax = row.argmax()
+                    copy = y_pred.copy()
+                    rows.append(np.where(copy == k, argmax, 0))
 
-            plt.legend([i for i,_ in enumerate(models)])
-            mlflow.log_figure(fig, ARTIFACTS_FOLDER + '/ARI.png')
-            plt.close(fig)
+                y_matched = np.array(rows).sum(axis=0)
+                acc = cast(float, accuracy_score(y_true, y_matched))
+                # mlflow.log_metric('Accuracy', acc, j)
+                accuracies.append(acc)
 
-        for file in os.listdir(ARTIFACTS_FOLDER):
-            os.unlink(os.path.join(ARTIFACTS_FOLDER, file))
+            models.append((period_model, [None] * i, [None] * i, [None] * i))
+            Xs.append(X)
+
+        fig, ax = plt.subplots(figsize=(40,20))
+        periods_index = [i for i,_ in enumerate(periods[1:])]
+        for model, aris,_,_ in models:
+            plt.plot(periods_index, aris, '-o', figure=fig)
+
+        ax.set_ylim(0, 1)
+        ax.set_xticks(periods_index)
+        for i, xpos in enumerate(ax.get_xticks()):
+            ax.text(xpos, -0.02, f"Period pop.\n{str(Xs[i].shape[0])}", size=10, ha='center')
+
+        plt.legend([i for i,_ in enumerate(models)])
+        plt.title("Evolution of ARI over time")
+        mlflow.log_figure(fig, ARTIFACTS_FOLDER + '/ARI.png')
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(40,20))
+        periods_index = [i for i,_ in enumerate(periods[1:])]
+        for model, _,v_measure,_ in models:
+            plt.plot(periods_index, v_measure, '-o', figure=fig)
+
+        ax.set_ylim(0, 1)
+        plt.legend([i for i,_ in enumerate(models)])
+        ax.set_xticks(periods_index)
+        plt.title("Evolution of V-mesure over time")
+        mlflow.log_figure(fig, ARTIFACTS_FOLDER + '/V-mesure.png')
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(40,20))
+        periods_index = [i for i,_ in enumerate(periods[1:])]
+        for model, _,_,accuracy in models:
+            plt.plot(periods_index, accuracy, '-o', figure=fig)
+
+        ax.set_ylim(0, 1)
+        plt.legend([i for i,_ in enumerate(models)])
+        ax.set_xticks(periods_index)
+        plt.title("Evolution of Accuracy over time")
+        mlflow.log_figure(fig, ARTIFACTS_FOLDER + '/accuracy.png')
+        plt.close(fig)
+
+    for file in os.listdir(ARTIFACTS_FOLDER):
+        os.unlink(os.path.join(ARTIFACTS_FOLDER, file))
