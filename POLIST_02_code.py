@@ -234,14 +234,14 @@ def analyze_clusters(data: pd.DataFrame, labels: pd.Series, title: str = "") -> 
     ), ARTIFACTS_FOLDER + '/Clusters size.json')
     # Boxplots per cluster
     for i in range(0, model.n_clusters):
-        fig, ax = plt.subplots()
+        # fig, ax = plt.subplots()
         cluster = grouped.get_group(i)
-        cluster.drop(columns=labels.name).plot.box(ax=ax, vert=False, subplots=True, layout=(
-            4, 1), sharex=False, title=f'Cluster {i} : {cluster.shape[0]} individus')
+        cluster.drop(columns=labels.name).plot.box(vert=False, subplots=True, layout=(
+            4, 1), sharex=True, title=f'Cluster {i} : {cluster.shape[0]} individus')
         plt.tight_layout()
-        mlflow.log_figure(fig, ARTIFACTS_FOLDER +
+        mlflow.log_figure(plt.gcf(), ARTIFACTS_FOLDER +
                           f'/[{title}] Cluster {i} boxplot.png')
-        plt.close(fig)
+        plt.close(plt.gcf())
         for idx, value in cluster.mean().drop(columns=labels.name).items():
             mlflow.log_metric(idx, value)
 
@@ -394,8 +394,8 @@ if __name__ == "__main__":
                 # Draw boxplots for each features in cluster
                 labels = pd.Series(model.labels_)
                 labels.name = 'label'
-                analyze_clusters(X, labels, "Log")
-                analyze_clusters(preprocess(dataset, True), labels, "Standard")
+                analyze_clusters(preprocess(dataset, False, False), labels, "Raw")
+                analyze_clusters(preprocess(dataset), labels, "Standard")
 
                 minMaxed = pd.DataFrame(
                     MinMaxScaler().fit_transform(X.values), columns=SELECTED_COLUMNS)
