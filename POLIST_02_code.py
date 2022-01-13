@@ -11,8 +11,10 @@ from typing import cast
 
 from kneed import KneeLocator
 import matplotlib.pyplot as plt
+# import matplotlib.cm as cm
 import mlflow
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans
 from sklearn.metrics import (
@@ -25,6 +27,7 @@ from sklearn.metrics import (
     calinski_harabasz_score,
     davies_bouldin_score,
     silhouette_score,
+    silhouette_samples
 )
 from sklearn.neighbors import NearestNeighbors
 from sklearn.pipeline import Pipeline
@@ -78,6 +81,72 @@ def preprocess(dataset: pd.DataFrame, scale: bool = True, log: bool = True) -> p
     preprocessor.fit(data.values)
     return pd.DataFrame(preprocessor.transform(data.values), columns=SELECTED_COLUMNS)
 
+def draw_silhouettes(X: npt.NDArray, nb_clusters:int, labels: npt.NDArray[typing.Any] ) -> plt.Figure:
+    """
+        Draw silhouettes for each cluster.
+
+        Parameters:
+            X: dataset to use
+            nb_clusters: number of clusters
+            labels: labels attach to the dataset by a clustering model
+
+        Returns:
+            The silhouette figure
+    """
+    fig, ax = plt.subplots()
+
+    # The silhouette coefficient can range from -1, 1 but in this example all
+    # lie within [-0.1, 1]
+    ax.set_xlim([-0.1, 1])
+    # The (n_clusters+1)*10 is for inserting blank space between silhouette
+    # plots of individual clusters, to demarcate them clearly.
+    ax.set_ylim([0, len(X) + (nb_clusters + 1) * 10])
+
+    # The silhouette_score gives the average value for all the samples.
+    # This gives a perspective into the density and separation of the formed
+    # clusters
+    silhouette_avg = silhouette_score(X, labels)
+
+    # Compute the silhouette scores for each sample
+    sample_silhouette_values = silhouette_samples(X, labels)
+
+    y_lower = 10
+    for i in range(nb_clusters):
+        # Aggregate the silhouette scores for samples belonging to
+        # cluster i, and sort them
+        ith_cluster_silhouette_values = sample_silhouette_values[labels == i]
+
+        ith_cluster_silhouette_values.sort()
+
+        size_cluster_i = ith_cluster_silhouette_values.shape[0]
+        y_upper = y_lower + size_cluster_i
+
+        # color = plt.nipy_spectral()
+        ax.fill_betweenx(
+            np.arange(y_lower, y_upper),
+            0,
+            ith_cluster_silhouette_values,
+            # facecolor=color,
+            # edgecolor=color,
+            cmap='nipy_spectral',
+            alpha=0.7,
+        )
+
+        # Label the silhouette plots with their cluster numbers at the middle
+        ax.text(-0.05, y_lower + 0.5 * size_cluster_i, str(i))
+
+        # Compute the new y_lower for next plot
+        y_lower = y_upper + 10  # 10 for the 0 samples
+
+    ax.set_xlabel("The silhouette coefficient values")
+    ax.set_ylabel("Cluster label")
+
+    # The vertical line for average silhouette score of all the values
+    ax.axvline(x=silhouette_avg, color="red", linestyle="--")
+
+    ax.set_yticks([])  # Clear the yaxis labels / ticks
+    ax.set_xticks([-0.1, 0, 0.2, 0.4, 0.6, 0.8, 1])
+    return fig
 
 def draw_radar_plot(data: tuple[typing.Any], labels: list[str], merged: bool = True, nb_columns: int = 2, figsize: tuple[int, int]=(10, 10)) -> plt.Figure:
     """
@@ -129,9 +198,11 @@ def create_clusters(X: pd.DataFrame, algorithm: Algorithms) -> None:
             algorithm: Clustering algorithm. Currently support K-Means, AgglomerativeClustering and DBSCAN
     """
     with mlflow.start_run(run_name=f"Clustering with {algorithm.value}", nested=True):
-        if algorithm == Algorithms.KMEANS or algorithm == Algorithms.AGGLO:
-            data = X if algorithm == Algorithms.KMEANS else X.sample(
+        data = X if algorithm == Algorithms.KMEANS else X.sample(
                 frac=AGGLO_SAMPLING_RATIO)
+        pca_visualizer = PCAViz()
+        pca_visualizer.fit(data.values)
+        if algorithm == Algorithms.KMEANS or algorithm == Algorithms.AGGLO:
             visualizer = KElbowVisualizer(KMeans(
             ) if algorithm == Algorithms.KMEANS else AgglomerativeClustering(), k=(2, 10))
             visualizer.fit(data.values)
@@ -153,27 +224,20 @@ def create_clusters(X: pd.DataFrame, algorithm: Algorithms) -> None:
                         nb_cluster, random_state=3) if algorithm == Algorithms.KMEANS else AgglomerativeClustering(nb_cluster)
                     model.fit(data.values)
 
-                    if algorithm == Algorithms.KMEANS:
-                        # Visualize clusters silhouette
-                        silhouette_visualizer = SilhouetteVisualizer(
-                            model, is_fitted=True)
-                        silhouette_visualizer.fit(data.values)
-                        mlflow.log_figure(
-                            silhouette_visualizer.fig, exp_artifacts_folder + f'/{algorithm.value} silhouttes.png')
-                        plt.close()
-                        mlflow.log_metric(
-                            'silhouettes score', silhouette_visualizer.silhouette_score_)
-                    else:
-                        mlflow.log_metric(
-                            'silhouettes score', silhouette_score(data, model.labels_))
+                    # Visualize clusters silhouettes
+                    fig = draw_silhouettes(data.values, nb_cluster, cast(npt.NDArray, model.labels_))
+                    mlflow.log_figure(
+                        fig, exp_artifacts_folder + f'/{algorithm.value} silhouettes.png')
+                    plt.close(fig)
 
                     # Visualize clusters on PCA projection
-                    pca_visualizer = PCAViz()
-                    pca_visualizer.fit_transform(data.values, model.labels_)
+                    pca_visualizer.transform(data.values, model.labels_)
                     mlflow.log_figure(pca_visualizer.fig, ARTIFACTS_FOLDER +
                                       f'/{algorithm.value} - {nb_cluster} cluster viz.png')
-                    plt.close()
+                    plt.close(pca_visualizer.fig)
 
+                    mlflow.log_metric(
+                        'silhouettes score', silhouette_score(data, model.labels_))
                     mlflow.log_metric(
                         f'calinski score', calinski_harabasz_score(data, model.labels_))
                     mlflow.log_metric(
@@ -204,8 +268,7 @@ def create_clusters(X: pd.DataFrame, algorithm: Algorithms) -> None:
             model.fit(X.values)
 
             # Visualize clusters on PCA projection
-            pca_visualizer = PCAViz()
-            pca_visualizer.fit_transform(X.values, model.labels_)
+            pca_visualizer.transform(X.values, model.labels_)
             mlflow.log_figure(pca_visualizer.fig, ARTIFACTS_FOLDER +
                               f'/{algorithm.value} - {len(np.unique(model.labels_))} cluster viz.png')
             plt.close()
@@ -338,13 +401,6 @@ if __name__ == "__main__":
             if NB_CLUSTER is None:
                 X = preprocess(dataset)
 
-                # Exploration
-                pca_visualizer = PCAViz(proj_features=True)
-                pca_visualizer.fit_transform(X.values)
-                mlflow.log_figure(pca_visualizer.fig,
-                                  ARTIFACTS_FOLDER + '/PCA.png')
-                plt.close()
-
                 for algo in Algorithms:
                     print(f'Creating clusters with {algo.value}')
                     create_clusters(X, algo)
@@ -412,13 +468,17 @@ if __name__ == "__main__":
         # Compute consistency scores between periods
         for i, _ in enumerate(periods):
             period_data = pd.concat(periods[:i+1])
+            period_only_data = periods[i]
             X = preprocess(period_data)
+            X_period = preprocess(period_only_data)
             period_model = KMeans(n_clusters=NB_CLUSTER, random_state=3)
             period_model.fit(X.values)
 
             for j, (model, aris, v_mesures, accuracies) in enumerate(models):
-                y_true = period_model.labels_
-                y_pred = model.predict(X.values)
+                # y_true = period_model.labels_
+                # y_pred = model.predict(X.values)
+                y_true = period_model.predict(X_period.values)
+                y_pred = model.predict(X_period.values)
                 # Adjusted Rand Score, label agnostic
                 ari = adjusted_rand_score(y_true, y_pred)
                 # mlflow.log_metric('ARI', ari, j)
